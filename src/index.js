@@ -28,8 +28,16 @@ module.exports = (robot) => {
 
 	const CHECK_INTERVAL = process.env.HUBOT_MUTE_CHECK_INTERVAL || 10000;
 	const DEFAULT_MUTE_TIME = process.env.HUBOT_MUTE_DEFAULT_TIME || null;
-	const BRAIN_STORE = 'mute_channels';
+	let ALLOW_GLOBAL_MUTE = process.env.HUBOT_MUTE_ALLOW_GLOBAL;
+
+	// Defaul to allow global mute. Doing an || won't work here, because setting it to false
+	// would mean the default always takes precedence
+	ALLOW_GLOBAL_MUTE = ALLOW_GLOBAL_MUTE === 'undefined' ? true : ALLOW_GLOBAL_MUTE;
+
+	const BRAIN_CHANNEL_STORE = 'mute_channels';
+	const BRAIN_GLOBAL_MUTE = 'global_mute';
 	let muted_channels = [];
+	let global_mute = false;
 
 	/*
 		Complicated regular expressions to match times such as:
@@ -48,7 +56,7 @@ module.exports = (robot) => {
 	 */
 	setInterval(() => {
 		muted_channels = muted_channels.filter(i => (i.expire === null) || (i.expire - new Date() < 0));
-		robot.brain.set(BRAIN_STORE, muted_channels);
+		robot.brain.set(BRAIN_CHANNEL_STORE, muted_channels);
 	}, CHECK_INTERVAL);
 
 
@@ -56,7 +64,8 @@ module.exports = (robot) => {
 	 * Get muted channels from brain
 	 */
 	robot.brain.on('loaded', () => {
-		muted_channels = robot.brain.get(BRAIN_STORE) || muted_channels;
+		muted_channels = robot.brain.get(BRAIN_CHANNEL_STORE) || muted_channels;
+		global_mute = robot.brain.get(BRAIN_GLOBAL_MUTE) || global_mute;
 	});
 
 
@@ -81,7 +90,7 @@ module.exports = (robot) => {
 		}
 
 		muted_channels.push({ room: msg.message.room, expire });
-		robot.brain.set(BRAIN_STORE, muted_channels);
+		robot.brain.set(BRAIN_CHANNEL_STORE, muted_channels);
 	});
 
 
@@ -91,7 +100,7 @@ module.exports = (robot) => {
 	robot.respond(/unmute$/i, msg => {
 		msg.finish();
 		muted_channels = muted_channels.filter(i => i.name !== msg.message.room);
-		robot.brain.set(BRAIN_STORE, muted_channels);
+		robot.brain.set(BRAIN_CHANNEL_STORE, muted_channels);
 	});
 
 
@@ -99,6 +108,10 @@ module.exports = (robot) => {
 	 * List currently muted channels, with expiry time if set
 	 */
 	robot.respond(/mute list$/i, msg => {
+
+		if (global_mute) {
+			msg.reply(`${robot.name} is muted globally`)
+		}
 
 		if (muted_channels.length === 0) {
 			msg.reply('No channels are muted');
@@ -110,11 +123,44 @@ module.exports = (robot) => {
 
 	});
 
+
+	robot.respond(/unmute all$/i, msg => {
+
+		if (ALLOW_GLOBAL_MUTE) {
+			const count = muted_channels.length;
+			muted_channels = [];
+			robot.brain.set(BRAIN_CHANNEL_STORE, muted_channels);
+
+			msg.reply(count > 0 ? `Unmuted ${count} channels` : `No channels were muted, so nothing was done`);
+		}
+
+		msg.finish();
+	});
+
+	/**
+	 * Global mute or unmute Hubot
+	 */
+	robot.respond(/global (mute|unmute)$/i, msg => {
+		msg.finish();
+
+		if (ALLOW_GLOBAL_MUTE) {
+			const action = msg.match[1].toLowerCase();
+			global_mute = action === 'mute';
+			robot.brain.set(BRAIN_GLOBAL_MUTE, global_mute);
+		}
+	});
+
 	
 	/**
 	 * Stop the response chain if the room is in the muted channels list
 	 */
 	robot.responseMiddleware((context, next, done) => {
+
+		if (global_mute) {
+			done();
+			return;
+		}
+		
 		let match = muted_channels.filter(i => i.name === context.response.message.room);
 		match.length > 0 ? done() : next();
 	});
